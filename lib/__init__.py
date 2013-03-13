@@ -1,0 +1,2 @@
+
+from gif import GIF
