@@ -1,7 +1,7 @@
 from distutils.core import setup, Extension
 import os
 
-NUMPY_INCLUDE_PATH = '/usr/lib/python2.7/dist-packages/numpy/core/include/numpy/'
+NUMPY_INCLUDE_PATH = '/usr/lib/pymodules/python2.7/numpy/core/include/numpy/'
 
 cutils = Extension('pygif.cutils',
                      sources = ['lib/cutils.c'],
