@@ -9,13 +9,10 @@ HEADER = "GIF89a"
 TRAILER = "\x3b"
 
 EXTENSION_INTRODUCER = "\x21"
+
+COMMENT_EXTENSION_LABEL = "\xfe"
                             
 APPLICATION_EXTENSION_BLOCK = "\x21\xFF\x0BNETSCAPE2.0\x03\x01%s\x00"
-
-GRAPHICS_CONTROL_EXTENSION = "\x21\xF9\x04"+\
-                             "%(packed_fields)s"+\
-                             "%(duration)s"+\
-                             "%(transparent_color_index)s\x00"
 
 def uInt(n):
   """Encode an integer as two bytes."""
@@ -51,6 +48,35 @@ class LogicalScreenDescriptor:
     return LogicalScreenDescriptor(w,h,packed_fields=pf,
                                    background_color_index=bci,
                                    aspect_ratio=ar)
+
+class GraphicControlExtension:
+  """A convenience class for graphic control extension blocks."""
+  LABEL = "\xF9"
+
+  def __init__(self,duration,**kwargs):
+    self.packed_fields = kwargs.get("packed_fields",8)
+    self.duration = duration
+    self.transparent_color_index = kwargs.get("transparent_color_index",0)
+    
+  def toFile(self,f):
+    f.write(EXTENSION_INTRODUCER+
+            self.LABEL+
+            "\x04"+  # block size
+            chr(self.packed_fields)+
+            uInt(self.duration)+
+            chr(self.transparent_color_index)+
+            "\x00")  # block terminator
+
+  @staticmethod
+  def fromFile(f):
+    # Assume that EXTENSION_INTRODUCER and LABEL have already been read.
+    assert f.read(1)=="\x04"
+    pf = ord(f.read(1))
+    duration = parseIntFromFile(f)
+    tci = ord(f.read(1))
+    assert f.read(1)=="\x00"
+    return GraphicControlExtension(duration,packed_fields=pf,
+                                   transparent_color_index=tci)
 
 class ImageDescriptor:
   """A convenience class for reading and writing image descriptor blocks."""

@@ -12,10 +12,12 @@ import lzw, cutils
 from spec import *
 
 def grayscaleColorTable(bits=8):
+  """ Make a grayscale color table with the specified bit depth. """
   conversion = 255./(2**bits-1)
   return ''.join([3*chr(int(conversion*i)) for i in range(2**bits)])
 
 def makeReducedColorTable(levels):
+  """ Make a color table corresponding to a posterization defined in levels. """
   assert len(levels)==3
   assert levels[0]*levels[1]*levels[2]<256
   conversions = [255./(l-1) for l in levels]
@@ -26,10 +28,12 @@ def makeReducedColorTable(levels):
   return colorTable
 
 def wrapReduceColor(channel,levels):
+  """ Wraps a function from cutils to make sure the input is correct. """
   channel = channel.astype(numpy.double)
   return cutils.reduceColor(channel,levels)  
 
 class GIF:
+  """ The main class for reading and writing GIF files. """
   def __init__(self,shape,duration=10,bitsPerColor=8,**kwargs):
     self.shape = shape
     self.globalColorTable = grayscaleColorTable(bitsPerColor)
@@ -37,21 +41,17 @@ class GIF:
     self.graphicBlocks = []
     self.duration = duration
 
-  def addFrameFromNumpyData(self,data,duration=None,colorTable=None):
-    if duration is None:
-      duration = self.duration
+  def addFrameFromNumpyData(self,data,colorTable=None):
     data = wrapReduceColor(data,2**self.bitsPerColor)
-    self.graphicBlocks.append(GraphicBlock(data,self.shape,duration,bitsPerColor=self.bitsPerColor))
+    self.graphicBlocks.append(GraphicBlock(data,self.shape,bitsPerColor=self.bitsPerColor))
 
-  def addRGBFrame(self,channels,duration=None,levels=[6,7,6]):
-    if duration is None:
-      duration = self.duration
+  def addRGBFrame(self,channels,levels=[6,7,6]):
     data = (levels[2]*levels[1]*wrapReduceColor(channels[0],levels[0])+
            levels[2]*wrapReduceColor(channels[1],levels[1])+
            wrapReduceColor(channels[2],levels[2])).astype(numpy.uint8)
     self.bitsPerColor = 8
     self.colorTable = makeReducedColorTable(levels)
-    self.graphicBlocks.append(GraphicBlock(data,self.shape,duration))
+    self.graphicBlocks.append(GraphicBlock(data,self.shape))
 
   def save(self,filename,loops=0):
     with open(filename,'wb') as f:
@@ -60,6 +60,9 @@ class GIF:
       LogicalScreenDescriptor(*self.shape,packed_fields=pf).toFile(f)
       f.write(self.globalColorTable)
       f.write(APPLICATION_EXTENSION_BLOCK % uInt(loops if loops else 65535))
+      GraphicControlExtension(self.duration).toFile(f)
+      # "packed_fields":'\x08' if transparency is None else '\x09',
+      # "transparent_color_index":chr(transparency) if transparency else '\x00'})
       for graphicBlock in self.graphicBlocks:
         graphicBlock.toFile(f)
       f.write(TRAILER)
@@ -79,42 +82,33 @@ class GIF:
         byte = f.read(1)
         if not byte or byte==TRAILER:
           break # Finished parsing the file.
+        elif byte==ImageDescriptor.IMAGE_SEPARATOR:
+          g.graphicBlocks.append(GraphicBlock.fromFile(f))
         elif byte==EXTENSION_INTRODUCER:
           label = f.read(1)
-          if label == "\xf9": # graphic control extension
-            assert ord(f.read(1))==4
-            packedFields = f.read(1)
-            duration = parseIntFromFile(f)
-            transparentColor = f.read(1)
-            assert ord(f.read(1))==0
-          elif label=="\xfe": # comment extension block
+          if label == GraphicControlExtension.LABEL:
+            GraphicControlExtension.fromFile(f)
+          elif label==COMMENT_EXTENSION_LABEL:
             DataBlock.fromFile(f)
           elif label=="\xff": # application extension block
             assert ord(f.read(1))==11
             f.read(11)
             DataBlock.fromFile(f)
           else:
-            raise Exception()
-        elif byte==ImageDescriptor.IMAGE_SEPARATOR:
-          g.graphicBlocks.append(GraphicBlock.fromFile(f))
+            raise Exception("Unknown label byte: %s" % ord(label))
         else:
-          print ord(byte)
-          raise Exception()
+          raise Exception("Unknown block byte: %s" % ord(byte))
     return g
 
 class GraphicBlock:
-  def __init__(self,imageData,shape,duration,**kwargs):
+  """ A class for graphic blocks containing an image descriptor and data. """
+  def __init__(self,imageData,shape,**kwargs):
     self.imageData = imageData
     self.shape = shape
-    self.duration = duration
     self.colorTable = kwargs.get("colorTable",None)
     self.bitsPerColor = kwargs.get("bitsPerColor",8)
     
   def toFile(self,f,transparency=None):
-    f.write(GRAPHICS_CONTROL_EXTENSION
-                % {"packed_fields":'\x08' if transparency is None else '\x09',
-                   "duration":uInt(int(self.duration)),
-                   "transparent_color_index":chr(transparency) if transparency else '\x00'})
     colorTableSize = None
     if self.colorTable:
       colorTableSize = int(math.log(len(self.colorTable)/3,2))
@@ -140,13 +134,13 @@ class GraphicBlock:
     codeSize = ord(f.read(1))
     data = DataBlock.fromFile(f).data
     imageData = numpy.array([ord(c) for c in lzw.decode(data,codeSize)])
-    return GraphicBlock(imageData,[desc.width,desc.height],10)
+    return GraphicBlock(imageData,[desc.width,desc.height])
 
 if __name__ == '__main__':
   dimensions = (200,200)
-  g = GIF(dimensions,bitsPerColor=2)
+  g = GIF(dimensions,bitsPerColor=2,duration=10)
   for i in range(256):
-    g.addFrameFromNumpyData(i+numpy.zeros(dimensions),duration=10)
+    g.addFrameFromNumpyData(i+numpy.zeros(dimensions))
   g.save("test.gif")
   g.fromFile("test.gif")
 
