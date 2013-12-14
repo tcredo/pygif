@@ -11,28 +11,47 @@ import numpy, math
 import lzw, cutils
 
 HEADER = "GIF89a"
+TRAILER = "\x3b"
+LOGICAL_SCREEN_DESCRIPTOR = "%(width)s"+\
+                            "%(height)s"+\
+                            "%(packed_fields)s"+\
+                            "%(background_color_index)s"+\
+                            "%(aspect_ratio)s"
+APPLICATION_EXTENSION_BLOCK = "\x21\xFF\x0BNETSCAPE2.0\x03\x01%s\x00"
+GRAPHICS_CONTROL_EXTENSION = "\x21\xF9\x04"+\
+                             "%(packed_fields)s"+\
+                             "%(duration)s"+\
+                             "%(transparent_color_index)s\x00"
+IMAGE_DESCRIPTOR = "\x2C%(left)s%(top)s%(width)s%(height)s%(packed_fields)s"
 
-def unsignedInt(n):
+def uInt(n):
+  """Encode an integer as two bytes."""
   return chr(n%256)+chr(n/256)
 
 def parseIntFromFile(f):
+  """Read two bytes from a file object and interpret as an unsigned int."""
   return ord(f.read(1))+256*ord(f.read(1))
 
-def blockData(data,blockSize=255):
-  blocks = []
-  while data:
-    block, data = data[:blockSize], data[blockSize:]
-    blocks.append(chr(len(block))+block)
-  blocks.append(chr(0))
-  return blocks
+class DataBlock:
+  """Convenience class for representing raw data blocks from a GIF file."""
+  def __init__(self,data):
+    self.data = data
 
-def readDataBlocks(f):
-  data = ""
-  bytesToRead = ord(f.read(1))
-  while bytesToRead:
-    data += f.read(bytesToRead)
+  def toFile(self,f,blockSize=255):
+    data = self.data[:]
+    while data:
+      block, data = data[:blockSize], data[blockSize:]
+      f.write(chr(len(block))+block)
+    f.write(chr(0))
+
+  @staticmethod
+  def fromFile(f):
+    data = ""
     bytesToRead = ord(f.read(1))
-  return data
+    while bytesToRead:
+      data += f.read(bytesToRead)
+      bytesToRead = ord(f.read(1))
+    return DataBlock(data)
 
 def grayscaleColorTable(bits=8):
   conversion = 255./(2**bits-1)
@@ -55,16 +74,16 @@ def wrapReduceColor(channel,levels):
 class GIF:
   def __init__(self,shape,duration=10,bitsPerColor=8,**kwargs):
     self.shape = shape
-    self.colorTable = grayscaleColorTable(bitsPerColor)
+    self.globalColorTable = grayscaleColorTable(bitsPerColor)
     self.bitsPerColor = bitsPerColor
-    self.frames = []
+    self.graphicBlocks = []
     self.duration = duration
 
-  def addFrame(self,data,duration=None,colorTable=None):
+  def addFrameFromNumpyData(self,data,duration=None,colorTable=None):
     if duration is None:
       duration = self.duration
     data = wrapReduceColor(data,2**self.bitsPerColor)
-    self.frames.append(Frame(data,self.shape,duration))
+    self.graphicBlocks.append(GraphicBlock(data,self.shape,duration,bitsPerColor=self.bitsPerColor))
 
   def addRGBFrame(self,channels,duration=None,levels=[6,7,6]):
     if duration is None:
@@ -74,29 +93,23 @@ class GIF:
            wrapReduceColor(channels[2],levels[2])).astype(numpy.uint8)
     self.bitsPerColor = 8
     self.colorTable = makeReducedColorTable(levels)
-    self.frames.append(Frame(data,self.shape,duration))
+    self.graphicBlocks.append(GraphicBlock(data,self.shape,duration))
 
-  def save(self,filename):
+  def save(self,filename,loops=0):
     with open(filename,'wb') as f:
       f.write(HEADER)
-      # logical screen descriptor
-      f.write(unsignedInt(self.shape[0]))
-      f.write(unsignedInt(self.shape[1]))
-      f.write(chr(128+(self.bitsPerColor-1))) # packed fields
-      f.write('\x00') # background color index
-      f.write('\x00') # aspect ratio (none given)
-      # global color table
-      f.write(self.colorTable)
-      # application extension block
-      repetitions=0
-      f.write("\x21\xFF\x0BNETSCAPE2.0\x03\x01")
-      f.write(unsignedInt(repetitions if repetitions else 65535))
-      f.write('\x00')
-      # image data
-      for i,frame in enumerate(self.frames):
-        frame.writeToFile(f,self.bitsPerColor)
-      f.write('\x3b') # trailer
-
+      f.write(LOGICAL_SCREEN_DESCRIPTOR
+                  % {"width":uInt(self.shape[0]),
+                     "height":uInt(self.shape[1]),
+                     "packed_fields":chr(128+(self.bitsPerColor-1)),
+                     "background_color_index":'\x00',
+                     "aspect_ratio":'\x00'})
+      f.write(self.globalColorTable)
+      f.write(APPLICATION_EXTENSION_BLOCK % uInt(loops if loops else 65535))
+      for graphicBlock in self.graphicBlocks:
+        graphicBlock.toFile(f)
+      f.write(TRAILER)
+      
   @staticmethod
   def fromFile(filename):
     with open(filename,'rb') as f:
@@ -126,15 +139,15 @@ class GIF:
             print transparentColor
             assert ord(f.read(1))==0
           elif byte=="\xfe": # comment extension block
-            print readDataBlocks(f)
+            print DataBlock.fromFile(f).data
           elif byte=="\xff": # application extension block
             assert ord(f.read(1))==11
             print f.read(11)
-            readDataBlocks(f)
+            DataBlock.fromFile(f)
           else:
             raise Exception()
         elif byte=="\x2C":
-          frames.append(Frame.fromFileData(f))
+          graphicBlocks.append(GraphicBlock.fromFile(f))
         elif byte=="\x3B":
           break
         else:
@@ -142,48 +155,45 @@ class GIF:
           raise Exception()
         byte = f.read(1)
     g = GIF((width,height),bitsPerColor=globalColorTableSize+1)
-    g.colorTable = colorTable
-    g.frames = frames
+    g.globalColorTable = colorTable
+    g.graphicBlocks = graphicBlocks
     return g
 
-class Frame:
+class GraphicBlock:
   def __init__(self,imageData,shape,duration,**kwargs):
     self.imageData = imageData
     self.shape = shape
     self.duration = duration
     self.colorTable = kwargs.get("colorTable",None)
+    self.bitsPerColor = kwargs.get("bitsPerColor",8)
     
-  def writeToFile(self,f,bitsPerColor):
-    # graphics control extension
-    transparency=None
-    f.write("\x21\xF9\x04")
-    f.write('\x08' if transparency is None else '\x09')
-    f.write(unsignedInt(int(self.duration)))
-    f.write(chr(transparency) if transparency else '\x00')
-    f.write('\x00')
-    # image descriptor
-    f.write('\x2C')
-    f.write(unsignedInt(0)) # image left position
-    f.write(unsignedInt(0))  # image top position
-    f.write(unsignedInt(self.shape[0]))
-    f.write(unsignedInt(self.shape[1]))
-    # local color table
+  def toFile(self,f,transparency=None):
+    f.write(GRAPHICS_CONTROL_EXTENSION
+                % {"packed_fields":'\x08' if transparency is None else '\x09',
+                   "duration":uInt(int(self.duration)),
+                   "transparent_color_index":chr(transparency) if transparency else '\x00'})
     colorTableSize = None
     if self.colorTable:
       colorTableSize = int(math.log(len(self.colorTable)/3,2))
-      packedValues = chr((1<<7)+colorTableSize-1)
-      f.write(packedValues)
-      f.write(self.colorTable)
+      packed_fields = chr((1<<7)+colorTableSize-1)
     else:
-      f.write('\x00') # packed values
+      packed_fields = "\x00"
+    f.write(IMAGE_DESCRIPTOR
+                % {"left":uInt(0),
+                   "top":uInt(0),
+                   "width":uInt(self.shape[0]),
+                   "height":uInt(self.shape[1]),
+                   "packed_fields":packed_fields})
+    if self.colorTable:
+      f.write(self.colorTable)
     # table based image data
-    codesize = bitsPerColor if colorTableSize is None else max(2,colorTableSize)
+    codesize = self.bitsPerColor if colorTableSize is None else max(2,colorTableSize)
     f.write(chr(codesize)) # code size
     data = lzw.encode(self.imageData.ravel(),codeSize=codesize)
-    f.write(''.join(blockData(data)))
+    DataBlock(data).toFile(f)
     
   @staticmethod
-  def fromFileData(f):
+  def fromFile(f):
     leftPosition = parseIntFromFile(f)
     topPosition = parseIntFromFile(f)
     width = parseIntFromFile(f)
@@ -194,15 +204,15 @@ class Frame:
     if localColorTable:
       colorTable = f.read(3*(2**(localColorTableSize+1)))
     codeSize = ord(f.read(1))
-    data = readDataBlocks(f)
+    data = DataBlock.fromFile(f).data
     imageData = numpy.array([ord(c) for c in lzw.decode(data,codeSize)])
-    return Frame(imageData,[width,height],10)
+    return GraphicBlock(imageData,[width,height],10)
 
 if __name__ == '__main__':
   dimensions = (200,200)
   g = GIF(dimensions,bitsPerColor=2)
   for i in range(256):
-    g.addFrame(i+numpy.zeros(dimensions),duration=10)
+    g.addFrameFromNumpyData(i+numpy.zeros(dimensions),duration=10)
   g.save("test.gif")
 
 
