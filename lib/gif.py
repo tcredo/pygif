@@ -7,7 +7,7 @@ Built with reference to:
 
 """
 
-import numpy
+import numpy, math
 import lzw, cutils
 
 HEADER = "GIF89a"
@@ -167,13 +167,19 @@ class Frame:
     f.write(unsignedInt(0))  # image top position
     f.write(unsignedInt(self.shape[0]))
     f.write(unsignedInt(self.shape[1]))
-    #if localColorTable:
-    #  bytes += '%x' % ((1<<7)+localColorTable-1)
-    #else:
-    f.write('\x00') # packed values
+    # local color table
+    colorTableSize = None
+    if self.colorTable:
+      colorTableSize = int(math.log(len(self.colorTable)/3,2))
+      packedValues = chr((1<<7)+colorTableSize-1)
+      f.write(packedValues)
+      f.write(self.colorTable)
+    else:
+      f.write('\x00') # packed values
     # table based image data
-    f.write(chr(bitsPerColor)) # code size
-    data = lzw.encode(self.imageData.ravel(),codeSize=bitsPerColor)
+    codesize = bitsPerColor if colorTableSize is None else max(2,colorTableSize)
+    f.write(chr(codesize)) # code size
+    data = lzw.encode(self.imageData.ravel(),codeSize=codesize)
     f.write(''.join(blockData(data)))
     
   @staticmethod

@@ -4,8 +4,8 @@ import os
 NUMPY_INCLUDE_PATH = '/usr/lib/pymodules/python2.7/numpy/core/include/numpy/'
 
 cutils = Extension('pygif.cutils',
-                     sources = ['lib/cutils.c'],
-                     include_dirs = [NUMPY_INCLUDE_PATH])
+                   sources = ['lib/cutils.c'],
+                   include_dirs = [NUMPY_INCLUDE_PATH])
 
 setup(name='pygif',
       version = '0.0',
