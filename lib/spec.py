@@ -11,8 +11,6 @@ TRAILER = "\x3b"
 EXTENSION_INTRODUCER = "\x21"
 
 COMMENT_EXTENSION_LABEL = "\xfe"
-                            
-APPLICATION_EXTENSION_BLOCK = "\x21\xFF\x0BNETSCAPE2.0\x03\x01%s\x00"
 
 def uInt(n):
   """Encode an integer as two bytes."""
@@ -48,6 +46,32 @@ class LogicalScreenDescriptor:
     return LogicalScreenDescriptor(w,h,packed_fields=pf,
                                    background_color_index=bci,
                                    aspect_ratio=ar)
+                                   
+class ApplicationExtension:
+  """A convenience class for application extension blocks."""
+  LABEL = "\xff"
+  
+  def __init__(self,repeat):
+    self.repeat = repeat
+    
+  def toFile(self,f):
+    f.write(EXTENSION_INTRODUCER+
+            self.LABEL+
+            "\x0BNETSCAPE2.0\x03\x01"+
+            uInt(self.repeat)+
+            "\x00")
+
+  @staticmethod    
+  def fromFile(f):
+    # Assume that EXTENSION_INTRODUCER and LABEL have already been read.
+    assert ord(f.read(1))==11           # fixed block size
+    assert f.read(11)=="NETSCAPE2.0"    # application id and authentication
+    assert ord(f.read(1))==3            # data block size
+    assert f.read(1)=="\x01"            # fixed byte
+    repeat = parseIntFromFile(f)        # repetitions
+    assert f.read(1)=="\x00"            # block terminator
+    return ApplicationExtension(repeat)
+  
 
 class GraphicControlExtension:
   """A convenience class for graphic control extension blocks."""

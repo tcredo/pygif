@@ -27,39 +27,45 @@ def makeReducedColorTable(levels):
   colorTable += chr(0)*3*(256-len(colorTable)/3)
   return colorTable
 
-def wrapReduceColor(channel,levels):
+def reduceColor(channel,levels):
   """ Wraps a function from cutils to make sure the input is correct. """
   channel = channel.astype(numpy.double)
-  return cutils.reduceColor(channel,levels)  
+  return cutils.reduceColor(channel,levels) 
+  
+def reduceColorRGB(channels,levels):
+  """ Posterize RGB channels and convert to color table indices. """
+  data = (levels[2]*levels[1]*reduceColor(channels[0],levels[0])+
+          levels[2]*reduceColor(channels[1],levels[1])+
+          reduceColor(channels[2],levels[2])).astype(numpy.uint8)
+  return data
 
 class GIF:
   """ The main class for reading and writing GIF files. """
-  def __init__(self,shape,duration=10,bitsPerColor=8,**kwargs):
+  def __init__(self,shape,bitsPerColor=8,**kwargs):
     self.shape = shape
     self.globalColorTable = grayscaleColorTable(bitsPerColor)
     self.bitsPerColor = bitsPerColor
     self.graphicBlocks = []
-    self.duration = duration
+    self.duration = kwargs.get("duration",10)
+    self.repeat = kwargs.get("repeat",0)
 
   def addFrameFromNumpyData(self,data,colorTable=None):
-    data = wrapReduceColor(data,2**self.bitsPerColor)
+    data = reduceColor(data,2**self.bitsPerColor)
     self.graphicBlocks.append(GraphicBlock(data,self.shape,bitsPerColor=self.bitsPerColor))
 
   def addRGBFrame(self,channels,levels=[6,7,6]):
-    data = (levels[2]*levels[1]*wrapReduceColor(channels[0],levels[0])+
-           levels[2]*wrapReduceColor(channels[1],levels[1])+
-           wrapReduceColor(channels[2],levels[2])).astype(numpy.uint8)
+    data = reduceColorRBG(channels,levels)
     self.bitsPerColor = 8
     self.colorTable = makeReducedColorTable(levels)
     self.graphicBlocks.append(GraphicBlock(data,self.shape))
 
-  def save(self,filename,loops=0):
+  def save(self,filename):
     with open(filename,'wb') as f:
       f.write(HEADER)
       pf = 128+(self.bitsPerColor-1)
       LogicalScreenDescriptor(*self.shape,packed_fields=pf).toFile(f)
       f.write(self.globalColorTable)
-      f.write(APPLICATION_EXTENSION_BLOCK % uInt(loops if loops else 65535))
+      ApplicationExtension(self.repeat).toFile(f)
       GraphicControlExtension(self.duration).toFile(f)
       # "packed_fields":'\x08' if transparency is None else '\x09',
       # "transparent_color_index":chr(transparency) if transparency else '\x00'})
@@ -90,10 +96,8 @@ class GIF:
             GraphicControlExtension.fromFile(f)
           elif label==COMMENT_EXTENSION_LABEL:
             DataBlock.fromFile(f)
-          elif label=="\xff": # application extension block
-            assert ord(f.read(1))==11
-            f.read(11)
-            DataBlock.fromFile(f)
+          elif label==ApplicationExtension.LABEL:
+            ApplicationExtension.fromFile(f)
           else:
             raise Exception("Unknown label byte: %s" % ord(label))
         else:
@@ -108,7 +112,7 @@ class GraphicBlock:
     self.colorTable = kwargs.get("colorTable",None)
     self.bitsPerColor = kwargs.get("bitsPerColor",8)
     
-  def toFile(self,f,transparency=None):
+  def toFile(self,f):
     colorTableSize = None
     if self.colorTable:
       colorTableSize = int(math.log(len(self.colorTable)/3,2))
@@ -120,7 +124,7 @@ class GraphicBlock:
       f.write(self.colorTable)
     # table based image data
     codesize = self.bitsPerColor if colorTableSize is None else max(2,colorTableSize)
-    f.write(chr(codesize)) # code size
+    f.write(chr(codesize))
     data = lzw.encode(self.imageData.ravel(),codeSize=codesize)
     DataBlock(data).toFile(f)
     
@@ -128,8 +132,8 @@ class GraphicBlock:
   def fromFile(f):
     desc = ImageDescriptor.fromFile(f)
     localColorTable = desc.packed_fields>>7
-    localColorTableSize = desc.packed_fields%8
     if localColorTable:
+      localColorTableSize = desc.packed_fields%8
       colorTable = f.read(3*(2**(localColorTableSize+1)))
     codeSize = ord(f.read(1))
     data = DataBlock.fromFile(f).data
