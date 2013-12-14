@@ -9,49 +9,7 @@ Built with reference to:
 
 import numpy, math
 import lzw, cutils
-
-HEADER = "GIF89a"
-TRAILER = "\x3b"
-LOGICAL_SCREEN_DESCRIPTOR = "%(width)s"+\
-                            "%(height)s"+\
-                            "%(packed_fields)s"+\
-                            "%(background_color_index)s"+\
-                            "%(aspect_ratio)s"
-APPLICATION_EXTENSION_BLOCK = "\x21\xFF\x0BNETSCAPE2.0\x03\x01%s\x00"
-GRAPHICS_CONTROL_EXTENSION = "\x21\xF9\x04"+\
-                             "%(packed_fields)s"+\
-                             "%(duration)s"+\
-                             "%(transparent_color_index)s\x00"
-IMAGE_DESCRIPTOR = "\x2C%(left)s%(top)s%(width)s%(height)s%(packed_fields)s"
-
-def uInt(n):
-  """Encode an integer as two bytes."""
-  return chr(n%256)+chr(n/256)
-
-def parseIntFromFile(f):
-  """Read two bytes from a file object and interpret as an unsigned int."""
-  return ord(f.read(1))+256*ord(f.read(1))
-
-class DataBlock:
-  """Convenience class for representing raw data blocks from a GIF file."""
-  def __init__(self,data):
-    self.data = data
-
-  def toFile(self,f,blockSize=255):
-    data = self.data[:]
-    while data:
-      block, data = data[:blockSize], data[blockSize:]
-      f.write(chr(len(block))+block)
-    f.write(chr(0))
-
-  @staticmethod
-  def fromFile(f):
-    data = ""
-    bytesToRead = ord(f.read(1))
-    while bytesToRead:
-      data += f.read(bytesToRead)
-      bytesToRead = ord(f.read(1))
-    return DataBlock(data)
+from spec import *
 
 def grayscaleColorTable(bits=8):
   conversion = 255./(2**bits-1)
@@ -98,12 +56,8 @@ class GIF:
   def save(self,filename,loops=0):
     with open(filename,'wb') as f:
       f.write(HEADER)
-      f.write(LOGICAL_SCREEN_DESCRIPTOR
-                  % {"width":uInt(self.shape[0]),
-                     "height":uInt(self.shape[1]),
-                     "packed_fields":chr(128+(self.bitsPerColor-1)),
-                     "background_color_index":'\x00',
-                     "aspect_ratio":'\x00'})
+      pf = 128+(self.bitsPerColor-1)
+      LogicalScreenDescriptor(*self.shape,packed_fields=pf).toFile(f)
       f.write(self.globalColorTable)
       f.write(APPLICATION_EXTENSION_BLOCK % uInt(loops if loops else 65535))
       for graphicBlock in self.graphicBlocks:
@@ -114,49 +68,38 @@ class GIF:
   def fromFile(filename):
     with open(filename,'rb') as f:
       assert f.read(6)==HEADER
-      # logical screen descriptor
-      width = parseIntFromFile(f)
-      height = parseIntFromFile(f)
-      packedFields = ord(f.read(1))
-      globalColorTable = packedFields>>7
-      globalColorTableSize = packedFields%8
-      backgroundColorIndex = f.read(1)
-      aspectRatio = f.read(1)
-      # global color table
+      lsd = LogicalScreenDescriptor.fromFile(f)
+      globalColorTable = lsd.packed_fields>>7
+      globalColorTableSize = lsd.packed_fields%8
       if globalColorTable:
         colorTable = f.read(3*(2**(globalColorTableSize+1)))
-      # other blocks
-      frames = []
-      byte = f.read(1)
-      while byte:
-        if byte=="\x21": # extension block
-          byte = f.read(1)
-          if byte == "\xf9": # graphic control extension
+      g = GIF((lsd.width,lsd.height),bitsPerColor=globalColorTableSize+1)
+      g.globalColorTable = colorTable
+      while True:
+        byte = f.read(1)
+        if not byte or byte==TRAILER:
+          break # Finished parsing the file.
+        elif byte==EXTENSION_INTRODUCER:
+          label = f.read(1)
+          if label == "\xf9": # graphic control extension
             assert ord(f.read(1))==4
             packedFields = f.read(1)
             duration = parseIntFromFile(f)
             transparentColor = f.read(1)
-            print transparentColor
             assert ord(f.read(1))==0
-          elif byte=="\xfe": # comment extension block
-            print DataBlock.fromFile(f).data
-          elif byte=="\xff": # application extension block
+          elif label=="\xfe": # comment extension block
+            DataBlock.fromFile(f)
+          elif label=="\xff": # application extension block
             assert ord(f.read(1))==11
-            print f.read(11)
+            f.read(11)
             DataBlock.fromFile(f)
           else:
             raise Exception()
-        elif byte=="\x2C":
-          graphicBlocks.append(GraphicBlock.fromFile(f))
-        elif byte=="\x3B":
-          break
+        elif byte==ImageDescriptor.IMAGE_SEPARATOR:
+          g.graphicBlocks.append(GraphicBlock.fromFile(f))
         else:
           print ord(byte)
           raise Exception()
-        byte = f.read(1)
-    g = GIF((width,height),bitsPerColor=globalColorTableSize+1)
-    g.globalColorTable = colorTable
-    g.graphicBlocks = graphicBlocks
     return g
 
 class GraphicBlock:
@@ -175,15 +118,10 @@ class GraphicBlock:
     colorTableSize = None
     if self.colorTable:
       colorTableSize = int(math.log(len(self.colorTable)/3,2))
-      packed_fields = chr((1<<7)+colorTableSize-1)
+      packed_fields = (1<<7)+colorTableSize-1
     else:
-      packed_fields = "\x00"
-    f.write(IMAGE_DESCRIPTOR
-                % {"left":uInt(0),
-                   "top":uInt(0),
-                   "width":uInt(self.shape[0]),
-                   "height":uInt(self.shape[1]),
-                   "packed_fields":packed_fields})
+      packed_fields = 0
+    ImageDescriptor(*self.shape,packed_fields=packed_fields).toFile(f)
     if self.colorTable:
       f.write(self.colorTable)
     # table based image data
@@ -194,19 +132,15 @@ class GraphicBlock:
     
   @staticmethod
   def fromFile(f):
-    leftPosition = parseIntFromFile(f)
-    topPosition = parseIntFromFile(f)
-    width = parseIntFromFile(f)
-    height = parseIntFromFile(f)
-    packedFields = ord(f.read(1))
-    localColorTable = packedFields>>7
-    localColorTableSize = packedFields%8
+    desc = ImageDescriptor.fromFile(f)
+    localColorTable = desc.packed_fields>>7
+    localColorTableSize = desc.packed_fields%8
     if localColorTable:
       colorTable = f.read(3*(2**(localColorTableSize+1)))
     codeSize = ord(f.read(1))
     data = DataBlock.fromFile(f).data
     imageData = numpy.array([ord(c) for c in lzw.decode(data,codeSize)])
-    return GraphicBlock(imageData,[width,height],10)
+    return GraphicBlock(imageData,[desc.width,desc.height],10)
 
 if __name__ == '__main__':
   dimensions = (200,200)
@@ -214,6 +148,7 @@ if __name__ == '__main__':
   for i in range(256):
     g.addFrameFromNumpyData(i+numpy.zeros(dimensions),duration=10)
   g.save("test.gif")
+  g.fromFile("test.gif")
 
 
 
