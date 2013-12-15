@@ -38,6 +38,14 @@ def reduceColorRGB(channels,levels):
           levels[2]*reduceColor(channels[1],levels[1])+
           reduceColor(channels[2],levels[2])).astype(numpy.uint8)
   return data
+  
+def colorPaletteToRGB(image_data,color_table):
+  """ Handles index arithmetic mapping color palette back to RGB values. """ 
+  color_table_array = numpy.array([ord(c) for c in color_table])
+  n_colors = color_table_array.size / 3
+  color_table_array = color_table_array.reshape((n_colors,3))
+  channels = [color_table_array[image_data,i] for i in range(3)]
+  return channels
 
 class GIF:
   """ The main class for reading and writing GIF files. """
@@ -58,6 +66,14 @@ class GIF:
     self.bitsPerColor = 8
     self.colorTable = makeReducedColorTable(levels)
     self.graphicBlocks.append(GraphicBlock(data,self.shape))
+    
+  def getFrameAsRGB(self,frame_number):
+    block = self.graphicBlocks[frame_number]
+    imageData = block.imageData.reshape(*self.shape)
+    if block.colorTable is not None:
+      return colorPaletteToRGB(imageData,block.colorTable)
+    else:
+      return colorPaletteToRGB(imageData,self.globalColorTable)
 
   def save(self,filename):
     with open(filename,'wb') as f:
@@ -79,8 +95,8 @@ class GIF:
       assert f.read(6)==HEADER
       lsd = LogicalScreenDescriptor.fromFile(f)
       globalColorTable = lsd.packed_fields>>7
-      globalColorTableSize = lsd.packed_fields%8
       if globalColorTable:
+        globalColorTableSize = lsd.packed_fields%8
         colorTable = f.read(3*(2**(globalColorTableSize+1)))
       g = GIF((lsd.width,lsd.height),bitsPerColor=globalColorTableSize+1)
       g.globalColorTable = colorTable
@@ -146,7 +162,7 @@ if __name__ == '__main__':
   for i in range(256):
     g.addFrameFromNumpyData(i+numpy.zeros(dimensions))
   g.save("test.gif")
-  g.fromFile("test.gif")
+  GIF.fromFile("test.gif")
 
 
 
